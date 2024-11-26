@@ -1,0 +1,128 @@
+Install Dependencies
+npm install axios react-router-dom
+
+Set Up Routes 
+// src/App.js
+import React from "react";
+import { BrowserRouter as Router, Route, Routes } from "react-router-dom";
+import Login from "./components/Login";
+import Dashboard from "./components/Dashboard";
+
+function App() {
+    return (
+        <Router>
+            <Routes>
+                <Route path="/" element={<Login />} />
+                <Route path="/dashboard" element={<Dashboard />} />
+            </Routes>
+        </Router>
+    );
+}
+
+export default App;
+
+
+Create Login Component
+// src/components/Login.js
+import React, { useState } from "react";
+import axios from "axios";
+import { useNavigate } from "react-router-dom";
+
+function Login() {
+    const [username, setUsername] = useState("");
+    const [password, setPassword] = useState("");
+    const [mfaToken, setMfaToken] = useState("");
+    const [error, setError] = useState("");
+    const navigate = useNavigate();
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+            const response = await axios.post("http://localhost:5000/login", {
+                username,
+                password,
+                mfa_token: mfaToken,
+            });
+            localStorage.setItem("token", response.data.access_token);
+            navigate("/dashboard");
+        } catch (err) {
+            setError("Invalid login credentials or MFA token.");
+        }
+    };
+
+    return (
+        <div>
+            <h2>Login</h2>
+            <form onSubmit={handleSubmit}>
+                <input
+                    type="text"
+                    placeholder="Username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    required
+                />
+                <input
+                    type="password"
+                    placeholder="Password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                />
+                <input
+                    type="text"
+                    placeholder="MFA Token"
+                    value={mfaToken}
+                    onChange={(e) => setMfaToken(e.target.value)}
+                    required
+                />
+                <button type="submit">Login</button>
+            </form>
+            {error && <p>{error}</p>}
+        </div>
+    );
+}
+
+export default Login;
+
+
+Create Dashboard Component
+Use the JWT token to fetch and display user data 
+// src/components/Dashboard.js
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+
+function Dashboard() {
+    const [data, setData] = useState(null);
+
+    useEffect(() => {
+        const fetchData = async () => {
+            try {
+                const token = localStorage.getItem("token");
+                const response = await axios.get("http://localhost:5000/dashboard", {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                });
+                setData(response.data);
+            } catch (err) {
+                console.error(err);
+            }
+        };
+
+        fetchData();
+    }, []);
+
+    return (
+        <div>
+            <h2>Dashboard</h2>
+            {data ? <pre>{JSON.stringify(data, null, 2)}</pre> : <p>Loading...</p>}
+        </div>
+    );
+}
+
+export default Dashboard;
+
+
+Start the Web App 
+npm start
+
