@@ -65,7 +65,7 @@ Comprehensive API documentation available in `API_DOCUMENTATION.md`
 See `CONTRIBUTING.md`
 
 ## License
-Proprietary - All Rights Reserved
+Apache 2.0
 
 ## Contact
 Enterprise Solutions Team
