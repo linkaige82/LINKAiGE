@@ -69,4 +69,4 @@ Proprietary - All Rights Reserved
 
 ## Contact
 Enterprise Solutions Team
-support@organizationmapping.com
+jericho@thehumanventures.com
