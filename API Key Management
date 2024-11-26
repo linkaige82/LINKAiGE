@@ -1,0 +1,330 @@
+import os
+import re
+import uuid
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
+
+from cryptography.fernet import Fernet
+from sqlalchemy import (
+    Column, String, DateTime, Boolean, 
+    Enum, ForeignKey, JSON, Integer
+)
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+
+# Enhanced Logging and Monitoring
+import sentry_sdk
+from prometheus_client import Counter, Gauge
+
+# Provider-Specific Imports
+import anthropic
+import openai
+import google.generativeai as genai
+from mistralai.client import MistralClient
+import huggingface_hub
+
+class LLMProviderSecurityManager:
+    # Comprehensive Provider Configuration
+    SUPPORTED_PROVIDERS = {
+        'anthropic': {
+            'base_url': 'https://api.anthropic.com/v1',
+            'key_pattern': r'^sk-ant-\w{48}$',
+            'client_class': anthropic.Anthropic,
+            'test_method': 'messages.create'
+        },
+        'openai': {
+            'base_url': 'https://api.openai.com/v1',
+            'key_pattern': r'^sk-\w{48}$',
+            'client_class': openai.OpenAI,
+            'test_method': 'models.list'
+        },
+        'google': {
+            'base_url': 'https://generativelanguage.googleapis.com/v1beta',
+            'key_pattern': r'^AI\w{35}$',
+            'client_class': genai,
+            'test_method': 'list_models'
+        },
+        'mistral': {
+            'base_url': 'https://api.mistral.ai/v1',
+            'key_pattern': r'^mis-\w{48}$',
+            'client_class': MistralClient,
+            'test_method': 'list_models'
+        },
+        'huggingface': {
+            'base_url': 'https://api.huggingface.co',
+            'key_pattern': r'^hf_[a-zA-Z0-9]{36}$',
+            'client_class': huggingface_hub,
+            'test_method': 'whoami'
+        }
+    }
+
+    # Metrics for Monitoring
+    KEY_VALIDATION_ATTEMPTS = Counter(
+        'llm_key_validation_attempts', 
+        'Total LLM API key validation attempts',
+        ['provider', 'status']
+    )
+    KEY_USAGE_COUNTER = Counter(
+        'llm_key_usage', 
+        'Total LLM API key usage',
+        ['provider', 'user']
+    )
+    ACTIVE_KEYS = Gauge(
+        'llm_active_keys', 
+        'Number of active LLM API keys',
+        ['provider']
+    )
+
+    def __init__(self, encryption_key=None):
+        # Encryption Setup
+        self.encryption_key = encryption_key or Fernet.generate_key()
+        self.cipher_suite = Fernet(self.encryption_key)
+        
+        # Sentry for Advanced Error Tracking
+        sentry_sdk.init(
+            dsn=os.getenv('SENTRY_DSN'),
+            traces_sample_rate=0.1
+        )
+
+    def validate_api_key(self, provider: str, api_key: str) -> Dict[str, Any]:
+        """
+        Comprehensive API key validation
+        
+        Returns:
+            Dict with validation details
+        """
+        if provider not in self.SUPPORTED_PROVIDERS:
+            return {
+                'valid': False, 
+                'reason': f"Unsupported provider: {provider}"
+            }
+        
+        provider_config = self.SUPPORTED_PROVIDERS[provider]
+        
+        # Pattern Matching
+        if not re.match(provider_config['key_pattern'], api_key):
+            self.KEY_VALIDATION_ATTEMPTS.labels(provider=provider, status='invalid_format').inc()
+            return {
+                'valid': False, 
+                'reason': "Invalid key format"
+            }
+        
+        try:
+            # Provider-Specific Validation
+            validation_result = self._test_provider_key(provider, api_key)
+            
+            if validation_result['valid']:
+                self.KEY_VALIDATION_ATTEMPTS.labels(provider=provider, status='success').inc()
+                return validation_result
+            
+            self.KEY_VALIDATION_ATTEMPTS.labels(provider=provider, status='connectivity_failed').inc()
+            return validation_result
+        
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
+            logging.error(f"Key validation error for {provider}: {e}")
+            return {
+                'valid': False, 
+                'reason': str(e)
+            }
+
+    def _test_provider_key(self, provider: str, api_key: str) -> Dict[str, Any]:
+        """
+        Provider-Specific Key Testing
+        """
+        provider_config = self.SUPPORTED_PROVIDERS[provider]
+        
+        try:
+            if provider == 'anthropic':
+                client = anthropic.Anthropic(api_key=api_key)
+                client.messages.create(
+                    model="claude-3-opus-20240229",
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": "Connection test"}]
+                )
+            
+            elif provider == 'openai':
+                client = openai.OpenAI(api_key=api_key)
+                client.models.list()
+            
+            elif provider == 'google':
+                genai.configure(api_key=api_key)
+                genai.list_models()
+            
+            elif provider == 'mistral':
+                client = MistralClient(api_key=api_key)
+                client.list_models()
+            
+            elif provider == 'huggingface':
+                huggingface_hub.login(token=api_key)
+                huggingface_hub.whoami()
+            
+            return {
+                'valid': True, 
+                'details': {
+                    'provider': provider,
+                    'tested_at': datetime.utcnow().isoformat()
+                }
+            }
+        
+        except Exception as e:
+            return {
+                'valid': False, 
+                'reason': f"Connectivity test failed: {str(e)}"
+            }
+
+# Database Models for Enhanced Tracking
+Base = declarative_base()
+
+class LLMProviderKeyAuditLog(Base):
+    """
+    Comprehensive Audit Log for LLM Provider Keys
+    """
+    __tablename__ = 'llm_provider_key_audits'
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)  # Foreign key to user table
+    provider = Column(Enum(*LLMProviderSecurityManager.SUPPORTED_PROVIDERS.keys()), nullable=False)
+    action = Column(Enum(
+        'KEY_ADDED', 
+        'KEY_UPDATED', 
+        'KEY_DELETED', 
+        'KEY_VALIDATED', 
+        'KEY_FAILED_VALIDATION'
+    ), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    details = Column(JSON)  # Additional context about the action
+    ip_address = Column(String)  # Source IP of the action
+    user_agent = Column(String)  # User agent of the request
+
+class LLMProviderKey(Base):
+    """
+    Secure and Auditable LLM Provider Key Storage
+    """
+    __tablename__ = 'llm_provider_keys'
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)  # Foreign key to user table
+    provider = Column(Enum(*LLMProviderSecurityManager.SUPPORTED_PROVIDERS.keys()), nullable=False)
+    encrypted_key = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_validated = Column(DateTime)
+    is_active = Column(Boolean, default=True)
+    validation_attempts = Column(Integer, default=0)
+    last_validation_status = Column(Boolean, default=False)
+
+# Flask Route with Enhanced Security and Monitoring
+@app.route('/api/llm/manage_provider_key', methods=['POST', 'PUT', 'DELETE'])
+@jwt_required()
+def manage_llm_provider_key():
+    """
+    Comprehensive LLM Provider Key Management Endpoint
+    """
+    current_user_id = get_jwt_identity()
+    data = request.get_json()
+    
+    # Role-Based Access Control
+    if not RBACManager.check_permission(current_user.role, 'manage_llm_keys'):
+        return jsonify({
+            'success': False, 
+            'message': 'Insufficient permissions'
+        }), 403
+    
+    provider = data.get('provider')
+    api_key = data.get('api_key')
+    
+    security_manager = LLMProviderSecurityManager()
+    
+    # Request Method Handling
+    if request.method == 'POST':
+        # Add New Key
+        validation_result = security_manager.validate_api_key(provider, api_key)
+        
+        if not validation_result['valid']:
+            # Log Failed Validation Attempt
+            audit_log = LLMProviderKeyAuditLog(
+                user_id=current_user_id,
+                provider=provider,
+                action='KEY_FAILED_VALIDATION',
+                details=validation_result,
+                ip_address=request.remote_addr,
+                user_agent=request.user_agent.string
+            )
+            db.session.add(audit_log)
+            db.session.commit()
+            
+            return jsonify({
+                'success': False, 
+                'message': validation_result['reason']
+            }), 400
+        
+        # Encrypt and Store Key
+        encrypted_key = security_manager.encrypt_api_key(api_key)
+        
+        new_provider_key = LLMProviderKey(
+            user_id=current_user_id,
+            provider=provider,
+            encrypted_key=encrypted_key,
+            last_validated=datetime.utcnow(),
+            last_validation_status=True
+        )
+        
+        # Audit Log
+        audit_log = LLMProviderKeyAuditLog(
+            user_id=current_user_id,
+            provider=provider,
+            action='KEY_ADDED',
+            details={'key_id': new_provider_key.id},
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string
+        )
+        
+        db.session.add(new_provider_key)
+        db.session.add(audit_log)
+        db.session.commit()
+        
+        # Update Metrics
+        security_manager.ACTIVE_KEYS.labels(provider=provider).inc()
+        
+        return jsonify({
+            'success': True, 
+            'message': 'API Key Added Successfully'
+        }), 201
+    
+    # Additional methods (PUT/DELETE) would follow similar patterns
+    # with comprehensive logging, validation, and metrics tracking
+
+# Background Validation Task
+def periodic_key_validation():
+    """
+    Scheduled task to periodically validate stored API keys
+    """
+    keys_to_validate = LLMProviderKey.query.filter_by(is_active=True).all()
+    security_manager = LLMProviderSecurityManager()
+    
+    for key in keys_to_validate:
+        validation_result = security_manager.validate_api_key(
+            key.provider, 
+            security_manager.decrypt_api_key(key.encrypted_key)
+        )
+        
+        key.last_validated = datetime.utcnow()
+        key.last_validation_status = validation_result['valid']
+        key.validation_attempts += 1
+        
+        # Deactivate key after multiple failed attempts
+        if key.validation_attempts > 3:
+            key.is_active = False
+        
+        # Audit Log
+        audit_log = LLMProviderKeyAuditLog(
+            user_id=key.user_id,
+            provider=key.provider,
+            action='KEY_VALIDATED',
+            details=validation_result,
+        )
+        
+        db.session.add(audit_log)
+    
+    db.session.commit()
